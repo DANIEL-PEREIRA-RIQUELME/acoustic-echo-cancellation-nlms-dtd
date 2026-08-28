@@ -137,12 +137,18 @@ $$
 
 ---
 
-### 2D Parameter Grid Search ($\mu$ vs $p$)
+### 2D & 3D Parameter Grid Search ($\mu$ vs $p$)
+
+<p align="center">
+  <img src="docs/figures/snr_3d_surface_rotation.gif" alt="3D Rotating SNR Surface Optimization" width="620"/>
+  <br/>
+  <em>Figure 3A: 3D rotating parameter optimization surface of Output SNR vs Filter Order $p$ and Step Size $\mu$ (DTD-Gated NLMS), highlighting the global optimum at $\mu = 0.016, p = 5$ ($47.87\text{ dB}$).</em>
+</p>
 
 <p align="center">
   <img src="docs/figures/snr_grid_search_curves.png" alt="SNR vs Filter Order and Step Size" width="850"/>
   <br/>
-  <em>Figure 3: Output SNR curves as a function of filter order $p$ and step size $\mu$: Left: Standard NLMS requires very small $\mu = 0.0005$ to limit divergence. Right: DTD-gated NLMS achieves optimal convergence at $\mu = 0.016$ and $p = 5$.</em>
+  <em>Figure 3B: Output SNR curves as a function of filter order $p$ and step size $\mu$: Left: Standard NLMS requires very small $\mu = 0.0005$ to limit divergence. Right: DTD-gated NLMS achieves optimal convergence at $\mu = 0.016$ and $p = 5$.</em>
 </p>
 
 ---
@@ -179,7 +185,8 @@ Evaluating the frequency response of the optimal converged FIR filter $\mathbf{w
 │
 └── docs/                              # Documentation & High-Resolution Figures
     ├── assignment.pdf                 # Official assignment handout / specification
-    └── figures/                       # Publication-quality 300 DPI plots
+    └── figures/                       # Publication-quality 300 DPI plots & animations
+        ├── snr_3d_surface_rotation.gif
         ├── time_domain_signals.png
         ├── filter_coefficient_evolution.png
         ├── snr_grid_search_curves.png
