@@ -164,12 +164,12 @@ def main():
     axs[0].legend(loc='upper right', frameon=True)
 
     axs[1].plot(time_axis, e_opt_no_dtd, color='#ff7f0e', linewidth=0.85)
-    axs[1].set_title(f'Standard NLMS Output (No DTD, $\mu={u_opt_no_dtd}, p={p_opt_no_dtd}$) — Output SNR = {best_snr_no_dtd:.2f} dB', fontsize=11, fontweight='bold')
+    axs[1].set_title(rf'Standard NLMS Output (No DTD, $\mu={u_opt_no_dtd}, p={p_opt_no_dtd}$) — Output SNR = {best_snr_no_dtd:.2f} dB', fontsize=11, fontweight='bold')
     axs[1].set_ylabel('Amplitude', fontsize=10)
     axs[1].axvline(dtd_index / fs_loc, color='black', linestyle='--', alpha=0.7)
 
     axs[2].plot(time_axis, e_opt_dtd, color='#2ca02c', linewidth=0.85)
-    axs[2].set_title(f'DTD-Gated NLMS Output (Freeze @ $n={dtd_index}$, $\mu={u_opt_dtd}, p={p_opt_dtd}$) — Output SNR = {best_snr_dtd:.2f} dB', fontsize=11, fontweight='bold')
+    axs[2].set_title(rf'DTD-Gated NLMS Output (Freeze @ $n={dtd_index}$, $\mu={u_opt_dtd}, p={p_opt_dtd}$) — Output SNR = {best_snr_dtd:.2f} dB', fontsize=11, fontweight='bold')
     axs[2].set_ylabel('Amplitude', fontsize=10)
     axs[2].axvline(dtd_index / fs_loc, color='black', linestyle='--', alpha=0.7)
 
@@ -190,7 +190,7 @@ def main():
     for k in range(p_opt_no_dtd):
         ax1.plot(w_opt_no_dtd[:, k], label=f'$w_{k}[n]$', linewidth=1.2)
     ax1.axvline(dtd_index, color='black', linestyle='--', label=f'Near-End Speech Start ($n={dtd_index}$)')
-    ax1.set_title(f'Standard NLMS Tap Adaptation ($\mu={u_opt_no_dtd}, p={p_opt_no_dtd}$)\n[Near-End Interference Causes Tap Divergence]', fontsize=11, fontweight='bold')
+    ax1.set_title(rf'Standard NLMS Tap Adaptation ($\mu={u_opt_no_dtd}, p={p_opt_no_dtd}$)' + '\n[Near-End Interference Causes Tap Divergence]', fontsize=11, fontweight='bold')
     ax1.set_xlabel('Sample Index $n$', fontsize=10)
     ax1.set_ylabel('Filter Tap Weight', fontsize=10)
     ax1.legend(loc='lower right', frameon=True, framealpha=0.9, fontsize=9)
@@ -198,7 +198,7 @@ def main():
     for k in range(p_opt_dtd):
         ax2.plot(w_opt_dtd[:, k], label=f'$w_{k}[n]$', linewidth=1.2)
     ax2.axvline(dtd_index, color='black', linestyle='--', label=f'DTD Freeze Trigger ($n={dtd_index}$)')
-    ax2.set_title(f'DTD-Gated NLMS Adaptation ($\mu={u_opt_dtd}, p={p_opt_dtd}$)\n[Adaptation Frozen to Protect Near-End Speech]', fontsize=11, fontweight='bold')
+    ax2.set_title(rf'DTD-Gated NLMS Adaptation ($\mu={u_opt_dtd}, p={p_opt_dtd}$)' + '\n[Adaptation Frozen to Protect Near-End Speech]', fontsize=11, fontweight='bold')
     ax2.set_xlabel('Sample Index $n$', fontsize=10)
     ax2.set_ylabel('Filter Tap Weight', fontsize=10)
     ax2.legend(loc='lower right', frameon=True, framealpha=0.9, fontsize=9)
@@ -212,14 +212,14 @@ def main():
     # -------------------------------------------------------------
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.2), dpi=300)
     for i, u in enumerate(u_vec):
-        ax1.plot(p_vec, snr_no_dtd_matrix[i, :], marker='o', label=f'$\mu={u}$', linewidth=1.2)
+        ax1.plot(p_vec, snr_no_dtd_matrix[i, :], marker='o', label=rf'$\mu={u}$', linewidth=1.2)
     ax1.set_title('Standard NLMS (No DTD): SNR vs Order $p$', fontsize=11, fontweight='bold')
     ax1.set_xlabel('Filter Order $p$', fontsize=10)
     ax1.set_ylabel('Output SNR [dB]', fontsize=10)
     ax1.legend(loc='upper right', fontsize=8, frameon=True)
 
     for i, u in enumerate(u_vec):
-        ax2.plot(p_vec, snr_dtd_matrix[i, :], marker='s', label=f'$\mu={u}$', linewidth=1.2)
+        ax2.plot(p_vec, snr_dtd_matrix[i, :], marker='s', label=rf'$\mu={u}$', linewidth=1.2)
     ax2.set_title('DTD-Gated NLMS: SNR vs Order $p$', fontsize=11, fontweight='bold')
     ax2.set_xlabel('Filter Order $p$', fontsize=10)
     ax2.set_ylabel('Output SNR [dB]', fontsize=10)
@@ -239,7 +239,7 @@ def main():
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True, dpi=300)
     ax1.plot(w_rad, h_db, color='#1f77b4', linewidth=1.5)
-    ax1.set_title(f'Estimated Room Acoustic Channel Response $H(e^{{j\omega}})$ (Optimal FIR $p={p_opt_dtd}$)', fontsize=11, fontweight='bold')
+    ax1.set_title(rf'Estimated Room Acoustic Channel Response $H(e^{{j\omega}})$ (Optimal FIR $p={p_opt_dtd}$)', fontsize=11, fontweight='bold')
     ax1.set_ylabel('Magnitude [dB]', fontsize=10)
     ax1.grid(True)
 
