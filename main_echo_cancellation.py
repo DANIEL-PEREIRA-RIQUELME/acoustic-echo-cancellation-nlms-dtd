@@ -1,260 +1,270 @@
 #!/usr/bin/env python3
 """
-Acoustic Echo Cancellation (AEC) Engine
-========================================
-Normalized Least Mean Squares (NLMS) adaptive filtering with Double-Talk Detection (DTD).
-Evaluates baseline SNR, performs 2D parameter optimization, and estimates acoustic channel response.
+Acoustic echo cancellation with NLMS and an ideal double-talk detector
+======================================================================
+Cancels the echo of a far-end signal in a microphone recording with a
+normalized LMS (NLMS) adaptive FIR filter, and compares two variants:
+
+  * continuous adaptation, and
+  * adaptation frozen from the sample where near-end speech starts
+    (an *ideal* double-talk detector: the onset index is known a priori).
+
+The script measures the baseline SNR, grid-searches the step size ``mu`` and
+the filter order ``p`` for both variants, exports the cancelled audio and
+plots the results.
+
+Usage:
+    python3 main_echo_cancellation.py
 
 Author: Daniel Pereira Riquelme
+Context: Digital Signal Processing course project
+License: MIT
 """
 
 from pathlib import Path
-import numpy as np
+from typing import NamedTuple, Optional
+
 import matplotlib.pyplot as plt
+import numpy as np
 from scipy.io import wavfile
 from scipy.signal import freqz
-
-# Plot configuration
-plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
-plt.rcParams['font.sans-serif'] = 'DejaVu Sans'
-plt.rcParams['axes.edgecolor'] = '#cccccc'
-plt.rcParams['axes.linewidth'] = 0.8
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 FIGURES_DIR = PROJECT_ROOT / "docs" / "figures"
 
+SAMPLE_RATE_HZ = 8000
+NEAR_END_ONSET = 2150  # first sample of near-end speech (double-talk starts)
+EPSILON = 1e-8         # regularization that avoids division by zero in NLMS
+MU_GRID = [0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128]
+ORDER_GRID = [2, 3, 4, 5, 6, 7]
+FIGURE_DPI = 300
 
-def compute_snr(signal: np.ndarray, distortion: np.ndarray) -> float:
-    """Calculates Signal-to-Noise Ratio (SNR) in dB."""
-    return 10.0 * np.log10(np.sum(signal**2) / np.sum(distortion**2))
+
+class NlmsResult(NamedTuple):
+    """Output of one NLMS run."""
+    error: np.ndarray    # cancelled signal e[n]
+    weights: np.ndarray  # tap history, shape (n_samples, order)
 
 
-def run_nlms(u_far: np.ndarray, s_mic: np.ndarray, mu: float, p: int, dtd_sample: int | None = None):
+class BestRun(NamedTuple):
+    """Best grid-search point for one NLMS variant."""
+    snr_db: float
+    mu: float
+    order: int
+    result: NlmsResult
+    snr_grid: np.ndarray  # shape (len(MU_GRID), len(ORDER_GRID))
+
+
+def compute_snr(reference: np.ndarray, distortion: np.ndarray) -> float:
+    """Return the SNR in dB of ``reference`` against ``distortion``."""
+    return 10.0 * np.log10(np.sum(reference**2) / np.sum(distortion**2))
+
+
+def run_nlms(far_end: np.ndarray, mic: np.ndarray, mu: float, order: int,
+             freeze_from: Optional[int] = None) -> NlmsResult:
+    """Run an NLMS adaptive FIR filter.
+
+    Args:
+        far_end: Far-end reference u[n] (loudspeaker signal).
+        mic: Microphone signal s[n] = x[n] + y[n].
+        mu: Step size (0 < mu < 2).
+        order: Number of filter taps.
+        freeze_from: If given, the weights stop adapting from this sample on.
+
+    Returns:
+        The error signal e[n] = s[n] - w^T u[n] and the tap history.
     """
-    Executes the Normalized Least Mean Squares (NLMS) adaptive FIR filter.
-
-    Parameters:
-        u_far: Far-end speech reference signal u[n]
-        s_mic: Microphone pickup signal s[n] = x[n] + y[n]
-        mu: Step-size convergence parameter
-        p: Filter order (number of taps M = p)
-        dtd_sample: If provided, freezes filter adaptation for n >= dtd_sample
-    """
-    n_samples = len(s_mic)
-    w = np.zeros(p, dtype=np.float64)
-    buffer = np.zeros(p, dtype=np.float64)
-    e = np.zeros(n_samples, dtype=np.float64)
-    w_hist = np.zeros((n_samples, p), dtype=np.float64)
-
-    eps = 1e-8  # Regularization constant to prevent division by zero
+    n_samples = len(mic)
+    w = np.zeros(order)
+    regressor = np.zeros(order)
+    error = np.zeros(n_samples)
+    weights = np.zeros((n_samples, order))
 
     for n in range(n_samples):
-        # Update tapped delay line buffer
-        buffer[1:] = buffer[:-1]
-        buffer[0] = u_far[n]
+        regressor[1:] = regressor[:-1]
+        regressor[0] = far_end[n]
 
-        # Filter output (estimated echo)
-        y_hat = np.dot(w, buffer)
+        error[n] = mic[n] - w @ regressor
 
-        # Error signal (cancelled output)
-        e[n] = s_mic[n] - y_hat
+        if freeze_from is None or n < freeze_from:
+            w += (mu * error[n] / (regressor @ regressor + EPSILON)) * regressor
 
-        # Adapt filter weights if DTD is inactive
-        if dtd_sample is None or n < dtd_sample:
-            pwr = np.dot(buffer, buffer) + eps
-            w += (mu * e[n] / pwr) * buffer
+        weights[n] = w
 
-        w_hist[n, :] = w
-
-    return e, w_hist
+    return NlmsResult(error, weights)
 
 
-def main():
+def grid_search(far_end: np.ndarray, mic: np.ndarray, near_end: np.ndarray,
+                freeze_from: Optional[int]) -> BestRun:
+    """Sweep ``MU_GRID`` x ``ORDER_GRID`` and keep the run with the best SNR."""
+    snr_grid = np.zeros((len(MU_GRID), len(ORDER_GRID)))
+    best: Optional[BestRun] = None
+
+    for i, mu in enumerate(MU_GRID):
+        for j, order in enumerate(ORDER_GRID):
+            result = run_nlms(far_end, mic, mu, order, freeze_from)
+            snr = compute_snr(near_end, result.error - near_end)
+            snr_grid[i, j] = snr
+            if best is None or snr > best.snr_db:
+                best = BestRun(snr, mu, order, result, snr_grid)
+
+    return best._replace(snr_grid=snr_grid)
+
+
+def _add_onset_marker(ax, x: float, label: Optional[str] = None) -> None:
+    ax.axvline(x, color="black", linestyle="--", alpha=0.7, label=label)
+
+
+def plot_time_domain(t: np.ndarray, mic: np.ndarray, near_end: np.ndarray,
+                     snr_raw: float, plain: BestRun, dtd: BestRun) -> None:
+    """Plot the microphone, both outputs and the clean near-end speech."""
+    onset_s = NEAR_END_ONSET / SAMPLE_RATE_HZ
+    panels = [
+        (mic, "#d62728",
+         f"Microphone signal $s[n] = x[n] + y[n]$ (SNR = {snr_raw:.2f} dB)"),
+        (plain.result.error, "#ff7f0e",
+         rf"NLMS, continuous adaptation ($\mu={plain.mu}$, $p={plain.order}$): "
+         f"SNR = {plain.snr_db:.2f} dB"),
+        (dtd.result.error, "#2ca02c",
+         rf"NLMS, frozen at $n={NEAR_END_ONSET}$ ($\mu={dtd.mu}$, $p={dtd.order}$): "
+         f"SNR = {dtd.snr_db:.2f} dB"),
+        (near_end, "#1f77b4", "Clean near-end speech $x[n]$"),
+    ]
+
+    fig, axes = plt.subplots(4, 1, figsize=(12, 9), sharex=True, dpi=FIGURE_DPI)
+    for ax, (signal, color, title) in zip(axes, panels):
+        ax.plot(t, signal, color=color, linewidth=0.85)
+        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_ylabel("Amplitude")
+        _add_onset_marker(ax, onset_s)
+    axes[0].lines[-1].set_label(f"Near-end speech onset ($n={NEAR_END_ONSET}$)")
+    axes[0].legend(loc="upper right", frameon=True)
+    axes[-1].set_xlabel("Time [s]")
+
+    fig.tight_layout()
+    fig.savefig(FIGURES_DIR / "time_domain_signals.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_tap_evolution(plain: BestRun, dtd: BestRun) -> None:
+    """Plot the tap trajectories of both variants side by side."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), dpi=FIGURE_DPI)
+    panels = [
+        (plain, "Continuous adaptation\n[near-end speech perturbs the taps]",
+         "Near-end speech onset"),
+        (dtd, "Adaptation frozen at the onset\n[taps are preserved]",
+         "Freeze point"),
+    ]
+    for ax, (run, subtitle, marker_label) in zip(axes, panels):
+        for k in range(run.order):
+            ax.plot(run.result.weights[:, k], label=f"$w_{k}[n]$", linewidth=1.2)
+        ax.axvline(NEAR_END_ONSET, color="black", linestyle="--",
+                   label=f"{marker_label} ($n={NEAR_END_ONSET}$)")
+        ax.set_title(rf"NLMS taps ($\mu={run.mu}$, $p={run.order}$)" + "\n" + subtitle,
+                     fontsize=11, fontweight="bold")
+        ax.set_xlabel("Sample index $n$")
+        ax.set_ylabel("Tap weight")
+        ax.legend(loc="lower right", frameon=True, framealpha=0.9, fontsize=9)
+
+    fig.tight_layout()
+    fig.savefig(FIGURES_DIR / "filter_coefficient_evolution.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_grid_search(plain: BestRun, dtd: BestRun) -> None:
+    """Plot output SNR versus filter order for every step size."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), dpi=FIGURE_DPI)
+    panels = [
+        (axes[0], plain, "o", "upper right", "Continuous adaptation"),
+        (axes[1], dtd, "s", "lower right", "Adaptation frozen at the onset"),
+    ]
+    for ax, run, marker, legend_loc, title in panels:
+        for i, mu in enumerate(MU_GRID):
+            ax.plot(ORDER_GRID, run.snr_grid[i], marker=marker,
+                    label=rf"$\mu={mu}$", linewidth=1.2)
+        ax.set_title(f"{title}: SNR vs filter order $p$", fontsize=11, fontweight="bold")
+        ax.set_xlabel("Filter order $p$")
+        ax.set_ylabel("Output SNR [dB]")
+        ax.legend(loc=legend_loc, fontsize=8, frameon=True)
+
+    fig.tight_layout()
+    fig.savefig(FIGURES_DIR / "snr_grid_search_curves.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_channel_response(dtd: BestRun) -> None:
+    """Plot the frequency response of the filter taken at the freeze point."""
+    taps = dtd.result.weights[NEAR_END_ONSET]
+    freqs_hz, h = freqz(b=taps, a=1, worN=1024, fs=SAMPLE_RATE_HZ)
+    magnitude_db = 20 * np.log10(np.abs(h) + 1e-12)
+    phase_deg = np.degrees(np.unwrap(np.angle(h)))
+
+    fig, (ax_mag, ax_phase) = plt.subplots(2, 1, figsize=(10, 6), sharex=True,
+                                           dpi=FIGURE_DPI)
+    ax_mag.plot(freqs_hz, magnitude_db, color="#1f77b4", linewidth=1.5)
+    ax_mag.set_title(rf"Estimated acoustic path $H(e^{{j\omega}})$ ($p={dtd.order}$ taps)",
+                     fontsize=11, fontweight="bold")
+    ax_mag.set_ylabel("Magnitude [dB]")
+
+    ax_phase.plot(freqs_hz, phase_deg, color="#d62728", linewidth=1.5)
+    ax_phase.set_title("Phase response", fontsize=11, fontweight="bold")
+    ax_phase.set_ylabel("Unwrapped phase [deg]")
+    ax_phase.set_xlabel("Frequency [Hz]")
+    ax_phase.set_xlim(0, SAMPLE_RATE_HZ / 2)
+
+    fig.tight_layout()
+    fig.savefig(FIGURES_DIR / "acoustic_channel_frequency_response.png",
+                bbox_inches="tight")
+    plt.close(fig)
+
+
+def write_wav(path: Path, signal: np.ndarray) -> None:
+    """Write ``signal`` as 16-bit PCM at the project sample rate."""
+    wavfile.write(path, SAMPLE_RATE_HZ, np.clip(signal, -32768, 32767).astype(np.int16))
+
+
+def load_wav(name: str) -> np.ndarray:
+    """Load an 8 kHz WAV file from ``data/`` as float64."""
+    rate, samples = wavfile.read(DATA_DIR / name)
+    if rate != SAMPLE_RATE_HZ:
+        raise ValueError(f"{name}: expected {SAMPLE_RATE_HZ} Hz, got {rate} Hz")
+    return samples.astype(np.float64)
+
+
+def main() -> None:
+    plt.rcParams["axes.edgecolor"] = "#cccccc"
+    plt.rcParams["axes.linewidth"] = 0.8
+    plt.rcParams["axes.grid"] = True
+    plt.rcParams["grid.alpha"] = 0.3
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load Audio WAV Files
-    fs_loc, local = wavfile.read(DATA_DIR / "local.wav")
-    fs_rem, remota = wavfile.read(DATA_DIR / "remota.wav")
-    fs_sig, signal_mic = wavfile.read(DATA_DIR / "signal.wav")
+    near_end = load_wav("near_end.wav")
+    far_end = load_wav("far_end.wav")
+    mic = load_wav("mic.wav")
+    t = np.arange(len(mic)) / SAMPLE_RATE_HZ
 
-    assert fs_loc == fs_rem == fs_sig == 8000, "Sampling rate must be 8 kHz."
+    snr_raw = compute_snr(near_end, mic - near_end)
+    plain = grid_search(far_end, mic, near_end, freeze_from=None)
+    dtd = grid_search(far_end, mic, near_end, freeze_from=NEAR_END_ONSET)
 
-    local = local.astype(np.float64)
-    remota = remota.astype(np.float64)
-    signal_mic = signal_mic.astype(np.float64)
-    n_samples = len(signal_mic)
-    time_axis = np.arange(n_samples) / fs_loc
+    print("Acoustic echo cancellation: NLMS with ideal double-talk detection")
+    print(f"  Unprocessed SNR:                {snr_raw:6.2f} dB")
+    for label, run in (("Continuous NLMS", plain), (f"NLMS frozen @ n={NEAR_END_ONSET}", dtd)):
+        print(f"  {label:<31} {run.snr_db:6.2f} dB  "
+              f"(+{run.snr_db - snr_raw:.2f} dB, mu={run.mu}, p={run.order})")
 
-    print("=" * 70)
-    print("  ACOUSTIC ECHO CANCELLATION (NLMS + DTD) OPTIMIZATION")
-    print("=" * 70)
+    write_wav(OUTPUT_DIR / "signal_canceled_nlms.wav", plain.result.error)
+    write_wav(OUTPUT_DIR / "signal_canceled_dtd.wav", dtd.result.error)
 
-    # Question 1: Unprocessed Baseline SNR
-    raw_distortion = signal_mic - local
-    snr_raw = compute_snr(local, raw_distortion)
-    print(f"\n[Task 1] Baseline SNR without Cancellation:")
-    print(f"  -> Unprocessed SNR: {snr_raw:.2f} dB")
-
-    # Question 2 & 3: 2D Grid Search
-    u_vec = [0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032, 0.064, 0.128]
-    p_vec = [2, 3, 4, 5, 6, 7]
-
-    snr_no_dtd_matrix = np.zeros((len(u_vec), len(p_vec)))
-    snr_dtd_matrix = np.zeros((len(u_vec), len(p_vec)))
-
-    best_snr_no_dtd = -np.inf
-    u_opt_no_dtd, p_opt_no_dtd = 0, 0
-    w_opt_no_dtd, e_opt_no_dtd = None, None
-
-    best_snr_dtd = -np.inf
-    u_opt_dtd, p_opt_dtd = 0, 0
-    w_opt_dtd, e_opt_dtd = None, None
-
-    dtd_index = 2150  # Sample where near-end local speech begins
-
-    for i, u in enumerate(u_vec):
-        for j, p in enumerate(p_vec):
-            # Standard NLMS (No DTD)
-            e_no_dtd, w_hist_no_dtd = run_nlms(remota, signal_mic, u, p, dtd_sample=None)
-            snr_no_dtd = compute_snr(local, e_no_dtd - local)
-            snr_no_dtd_matrix[i, j] = snr_no_dtd
-
-            if snr_no_dtd > best_snr_no_dtd:
-                best_snr_no_dtd = snr_no_dtd
-                u_opt_no_dtd, p_opt_no_dtd = u, p
-                w_opt_no_dtd = w_hist_no_dtd
-                e_opt_no_dtd = e_no_dtd
-
-            # DTD-Gated NLMS (Freeze @ n=2150)
-            e_dtd, w_hist_dtd = run_nlms(remota, signal_mic, u, p, dtd_sample=dtd_index)
-            snr_dtd = compute_snr(local, e_dtd - local)
-            snr_dtd_matrix[i, j] = snr_dtd
-
-            if snr_dtd > best_snr_dtd:
-                best_snr_dtd = snr_dtd
-                u_opt_dtd, p_opt_dtd = u, p
-                w_opt_dtd = w_hist_dtd
-                e_opt_dtd = e_dtd
-
-    print(f"\n[Task 2] Standard NLMS (Continuous Adaptation, No DTD):")
-    print(f"  -> Optimal Parameters: mu = {u_opt_no_dtd}, p = {p_opt_no_dtd}")
-    print(f"  -> Maximum Output SNR: {best_snr_no_dtd:.2f} dB (Improvement: +{best_snr_no_dtd - snr_raw:.2f} dB)")
-
-    print(f"\n[Task 3] DTD-Gated NLMS (Adaptation Frozen @ n >= {dtd_index}):")
-    print(f"  -> Optimal Parameters: mu = {u_opt_dtd}, p = {p_opt_dtd}")
-    print(f"  -> Maximum Output SNR: {best_snr_dtd:.2f} dB (Improvement: +{best_snr_dtd - snr_raw:.2f} dB)")
-    print("=" * 70)
-
-    # Export Processed Audio Files
-    wavfile.write(OUTPUT_DIR / "signal_canceled_nlms.wav", fs_loc, np.clip(e_opt_no_dtd, -32768, 32767).astype(np.int16))
-    wavfile.write(OUTPUT_DIR / "signal_canceled_dtd.wav", fs_loc, np.clip(e_opt_dtd, -32768, 32767).astype(np.int16))
-    print(f"\n[Export] Saved audio files to {OUTPUT_DIR}/")
-
-    # -------------------------------------------------------------
-    # Plot 1: Time Domain Waveforms
-    # -------------------------------------------------------------
-    fig, axs = plt.subplots(4, 1, figsize=(12, 9), sharex=True, dpi=300)
-    axs[0].plot(time_axis, signal_mic, color='#d62728', linewidth=0.85)
-    axs[0].set_title(f'Contaminated Microphone Signal $s[n] = x[n] + y[n]$ (Raw SNR = {snr_raw:.2f} dB)', fontsize=11, fontweight='bold')
-    axs[0].set_ylabel('Amplitude', fontsize=10)
-    axs[0].axvline(dtd_index / fs_loc, color='black', linestyle='--', alpha=0.7, label=f'Near-End Speech Start ($n={dtd_index}$)')
-    axs[0].legend(loc='upper right', frameon=True)
-
-    axs[1].plot(time_axis, e_opt_no_dtd, color='#ff7f0e', linewidth=0.85)
-    axs[1].set_title(rf'Standard NLMS Output (No DTD, $\mu={u_opt_no_dtd}, p={p_opt_no_dtd}$) — Output SNR = {best_snr_no_dtd:.2f} dB', fontsize=11, fontweight='bold')
-    axs[1].set_ylabel('Amplitude', fontsize=10)
-    axs[1].axvline(dtd_index / fs_loc, color='black', linestyle='--', alpha=0.7)
-
-    axs[2].plot(time_axis, e_opt_dtd, color='#2ca02c', linewidth=0.85)
-    axs[2].set_title(rf'DTD-Gated NLMS Output (Freeze @ $n={dtd_index}$, $\mu={u_opt_dtd}, p={p_opt_dtd}$) — Output SNR = {best_snr_dtd:.2f} dB', fontsize=11, fontweight='bold')
-    axs[2].set_ylabel('Amplitude', fontsize=10)
-    axs[2].axvline(dtd_index / fs_loc, color='black', linestyle='--', alpha=0.7)
-
-    axs[3].plot(time_axis, local, color='#1f77b4', linewidth=0.85)
-    axs[3].set_title('Clean Near-End Ground Truth Speech $x[n]$', fontsize=11, fontweight='bold')
-    axs[3].set_ylabel('Amplitude', fontsize=10)
-    axs[3].set_xlabel('Time [seconds]', fontsize=10)
-    axs[3].axvline(dtd_index / fs_loc, color='black', linestyle='--', alpha=0.7)
-
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "time_domain_signals.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # -------------------------------------------------------------
-    # Plot 2: Tap Coefficient Convergence Comparison
-    # -------------------------------------------------------------
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.2), dpi=300)
-    for k in range(p_opt_no_dtd):
-        ax1.plot(w_opt_no_dtd[:, k], label=f'$w_{k}[n]$', linewidth=1.2)
-    ax1.axvline(dtd_index, color='black', linestyle='--', label=f'Near-End Speech Start ($n={dtd_index}$)')
-    ax1.set_title(rf'Standard NLMS Tap Adaptation ($\mu={u_opt_no_dtd}, p={p_opt_no_dtd}$)' + '\n[Near-End Interference Causes Tap Divergence]', fontsize=11, fontweight='bold')
-    ax1.set_xlabel('Sample Index $n$', fontsize=10)
-    ax1.set_ylabel('Filter Tap Weight', fontsize=10)
-    ax1.legend(loc='lower right', frameon=True, framealpha=0.9, fontsize=9)
-
-    for k in range(p_opt_dtd):
-        ax2.plot(w_opt_dtd[:, k], label=f'$w_{k}[n]$', linewidth=1.2)
-    ax2.axvline(dtd_index, color='black', linestyle='--', label=f'DTD Freeze Trigger ($n={dtd_index}$)')
-    ax2.set_title(rf'DTD-Gated NLMS Adaptation ($\mu={u_opt_dtd}, p={p_opt_dtd}$)' + '\n[Adaptation Frozen to Protect Near-End Speech]', fontsize=11, fontweight='bold')
-    ax2.set_xlabel('Sample Index $n$', fontsize=10)
-    ax2.set_ylabel('Filter Tap Weight', fontsize=10)
-    ax2.legend(loc='lower right', frameon=True, framealpha=0.9, fontsize=9)
-
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "filter_coefficient_evolution.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # -------------------------------------------------------------
-    # Plot 3: 2D Grid Search SNR Analysis
-    # -------------------------------------------------------------
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.2), dpi=300)
-    for i, u in enumerate(u_vec):
-        ax1.plot(p_vec, snr_no_dtd_matrix[i, :], marker='o', label=rf'$\mu={u}$', linewidth=1.2)
-    ax1.set_title('Standard NLMS (No DTD): SNR vs Order $p$', fontsize=11, fontweight='bold')
-    ax1.set_xlabel('Filter Order $p$', fontsize=10)
-    ax1.set_ylabel('Output SNR [dB]', fontsize=10)
-    ax1.legend(loc='upper right', fontsize=8, frameon=True)
-
-    for i, u in enumerate(u_vec):
-        ax2.plot(p_vec, snr_dtd_matrix[i, :], marker='s', label=rf'$\mu={u}$', linewidth=1.2)
-    ax2.set_title('DTD-Gated NLMS: SNR vs Order $p$', fontsize=11, fontweight='bold')
-    ax2.set_xlabel('Filter Order $p$', fontsize=10)
-    ax2.set_ylabel('Output SNR [dB]', fontsize=10)
-    ax2.legend(loc='lower right', fontsize=8, frameon=True)
-
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "snr_grid_search_curves.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # -------------------------------------------------------------
-    # Plot 4: Frequency & Impulse Response of Estimated Acoustic Channel
-    # -------------------------------------------------------------
-    w_final = w_opt_dtd[dtd_index, :]
-    w_rad, h = freqz(b=w_final, a=1, worN=1024, fs=fs_loc)
-    h_db = 20 * np.log10(np.abs(h) + 1e-12)
-    phase_deg = np.unwrap(np.angle(h)) * 180 / np.pi
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True, dpi=300)
-    ax1.plot(w_rad, h_db, color='#1f77b4', linewidth=1.5)
-    ax1.set_title(rf'Estimated Room Acoustic Channel Response $H(e^{{j\omega}})$ (Optimal FIR $p={p_opt_dtd}$)', fontsize=11, fontweight='bold')
-    ax1.set_ylabel('Magnitude [dB]', fontsize=10)
-    ax1.grid(True)
-
-    ax2.plot(w_rad, phase_deg, color='#d62728', linewidth=1.5)
-    ax2.set_title('Phase Response (Linear Phase Characteristic)', fontsize=11, fontweight='bold')
-    ax2.set_ylabel('Unwrapped Phase [deg]', fontsize=10)
-    ax2.set_xlabel('Frequency [Hz]', fontsize=10)
-    ax2.set_xlim([0, fs_loc / 2])
-    ax2.grid(True)
-
-    plt.tight_layout()
-    plt.savefig(FIGURES_DIR / "acoustic_channel_frequency_response.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-    print(f"[Done] Generated all 4 figures in {FIGURES_DIR}/")
+    plot_time_domain(t, mic, near_end, snr_raw, plain, dtd)
+    plot_tap_evolution(plain, dtd)
+    plot_grid_search(plain, dtd)
+    plot_channel_response(dtd)
+    print(f"  Audio written to {OUTPUT_DIR}, figures to {FIGURES_DIR}")
 
 
 if __name__ == "__main__":
