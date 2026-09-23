@@ -187,8 +187,9 @@ Evaluating the frequency response of the optimal converged FIR filter $\mathbf{w
 │
 └── docs/                              # Documentation & High-Resolution Figures
     ├── assignment.pdf                 # Official assignment handout / specification
-    └── figures/                       # 300 DPI plots and the 3D surface animation
+    └── figures/                       # 300 DPI plots and the 3D surface animations
         ├── snr_3d_surface_rotation.gif
+        ├── snr_DTD_rotation.gif
         ├── time_domain_signals.png
         ├── filter_coefficient_evolution.png
         ├── snr_grid_search_curves.png
@@ -222,8 +223,6 @@ python3 main_echo_cancellation.py
 ```
 
 ---
-
-## Academic Citation & Author
 
 ## Limitations
 
